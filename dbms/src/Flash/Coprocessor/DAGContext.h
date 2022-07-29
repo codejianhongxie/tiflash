@@ -27,6 +27,7 @@
 #include <Common/Logger.h>
 #include <DataStreams/BlockIO.h>
 #include <DataStreams/IBlockInputStream.h>
+#include <Flash/Coprocessor/StreamWriter.h>
 #include <Flash/Coprocessor/TablesRegionsInfo.h>
 #include <Flash/Mpp/MPPTaskId.h>
 #include <Interpreters/SubqueryForSet.h>
@@ -122,7 +123,7 @@ inline bool enableFineGrainedShuffle(uint64_t stream_count)
     return stream_count > 0;
 }
 
-extern const String enableFineGrainedShuffleExtraInfo;
+static constexpr std::string_view enableFineGrainedShuffleExtraInfo = "enable fine grained shuffle";
 
 /// A context used to track the information that needs to be passed around during DAG planning.
 class DAGContext
@@ -342,6 +343,7 @@ public:
     bool is_batch_cop = false;
     // `tunnel_set` is always set by `MPPTask` and is intended to be used for `DAGQueryBlockInterpreter`.
     MPPTunnelSetPtr tunnel_set;
+    std::shared_ptr<StreamWriter> batch_cop_writer;
     TablesRegionsInfo tables_regions_info;
     // part of regions_for_local_read + regions_for_remote_read, only used for batch-cop
     RegionInfoList retry_regions;
@@ -393,7 +395,7 @@ private:
     std::vector<SubqueriesForSets> subqueries;
 
     bool is_test = false; /// switch for test, do not use it in production.
-    std::unordered_map<String, ColumnsWithTypeAndName> columns_for_test_map; /// <exector_id, columns>, for multiple sources
+    std::unordered_map<String, ColumnsWithTypeAndName> columns_for_test_map; /// <executor_id, columns>, for multiple sources
 };
 
 } // namespace DB

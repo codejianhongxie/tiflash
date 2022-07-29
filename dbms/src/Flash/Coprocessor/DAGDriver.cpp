@@ -13,9 +13,11 @@
 // limitations under the License.
 
 #include <Common/TiFlashMetrics.h>
+#include <Common/formatReadable.h>
 #include <Core/QueryProcessingStage.h>
 #include <DataStreams/BlockIO.h>
 #include <DataStreams/IProfilingBlockInputStream.h>
+#include <DataStreams/NullBlockOutputStream.h>
 #include <DataStreams/copyData.h>
 #include <Flash/Coprocessor/DAGBlockOutputStream.h>
 #include <Flash/Coprocessor/DAGDriver.h>
@@ -28,6 +30,7 @@
 #include <Interpreters/executeQuery.h>
 #include <Storages/Transaction/LockException.h>
 #include <Storages/Transaction/RegionException.h>
+#include <common/logger_useful.h>
 #include <pingcap/Exception.h>
 
 namespace DB
@@ -92,6 +95,16 @@ try
     DAGQuerySource dag(context);
     DAGContext & dag_context = *context.getDAGContext();
 
+    const auto & settings = context.getSettingsRef();
+    if constexpr (batch)
+    {
+        dag_context.batch_cop_writer = std::make_shared<StreamWriter>(writer, settings.wn_send_buffer);
+    }
+    else
+    {
+        LOG_DEBUG(log, "setting batch_cop_writer to nullptr");
+    }
+
     BlockIO streams = executeQuery(dag, context, internal, QueryProcessingStage::Complete);
     if (!streams.in || streams.out)
         // Only query is allowed, so streams.in must not be null and streams.out must be null
@@ -126,28 +139,17 @@ try
             }
             writer->Write(response);
         }
+        // TODO: here is hacked, encode for batch cop with concurrency in function `executeCreatingSets`
+        dag_output_stream = std::make_shared<NullBlockOutputStream>(streams.in->getHeader());
 
-        auto streaming_writer = std::make_shared<StreamWriter>(writer);
-        TiDB::TiDBCollators collators;
-
-        std::unique_ptr<DAGResponseWriter> response_writer = std::make_unique<StreamingDAGResponseWriter<StreamWriterPtr, false>>(
-            streaming_writer,
-            std::vector<Int64>(),
-            collators,
-            tipb::ExchangeType::PassThrough,
-            context.getSettingsRef().dag_records_per_chunk,
-            context.getSettingsRef().batch_send_min_limit,
-            true,
-            dag_context,
-            /*fine_grained_shuffle_stream_count=*/0,
-            /*fine_grained_shuffle_batch_size=*/0);
-        dag_output_stream = std::make_shared<DAGBlockOutputStream>(streams.in->getHeader(), std::move(response_writer));
         copyData(*streams.in, *dag_output_stream);
     }
 
-    auto throughput = dag_context.getTableScanThroughput();
-    if (throughput.first)
+    if (auto throughput = dag_context.getTableScanThroughput(); throughput.first)
+    {
         GET_METRIC(tiflash_storage_logical_throughput_bytes).Observe(throughput.second);
+        LOG_FMT_INFO(log, "table scan throughput {}/s", formatReadableSizeWithBinarySuffix(throughput.second, 2));
+    }
 
     if (context.getProcessListElement())
     {
